@@ -757,6 +757,7 @@ std::string convert_hunyuan_video_to_original_flux(std::string name) {
 // Called with the "text_encoders." prefix already stripped, so the name still carries "llm.".
 std::string convert_llada2_moe_te_name(std::string name) {
     static const std::vector<std::pair<std::string, std::string>> name_map = {
+        {"model.language_model.embed_tokens.", "model.embed_tokens."},
         {"model.language_model.word_embeddings.", "model.embed_tokens."},
         {"model.language_model.norm.", "model.norm."},
         {"model.language_model.lm_head.", "lm_head."},
