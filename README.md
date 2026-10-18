@@ -10,6 +10,8 @@
 
 Diffusion model(SD,Flux,Wan,...) inference in pure C/C++
 
+V100 / SM70 分支的图片、H3 构建选项、多卡分层及验证范围见 [SM70 构建说明](./docs/sm70.md)。
+
 ***Note that this project is under active development. \
 API and command-line option may change frequently.***
 

@@ -77,8 +77,11 @@ pipeline.
 Reference inputs are presented to Qwen3-VL in image, video, then audio order.
 Videos are sampled at 2 fps for the Qwen presentation while their full 24 fps
 latents condition the diffusion transformer. Paired video and audio references
-share the same timeline. Ref2VA cannot be combined with `--init-img` or
-`--end-img` in one request.
+share the same timeline.
+
+本分支允许 Ref2VA 与 `--init-img`／`--end-img` 组合：普通参考保留自己的参考序号，Guide 按指定原始帧索引定位；内部按文本、Guide、普通参考、目标音频、目标视频组织条件，并以普通参考跨度之后的位置作为目标时间原点。普通参考图不会被当作首帧 Guide。
+
+混用支持已经过 CPU 布局检查，但尚未完成真实混合 Guide 成片验收；既有实机成功配方使用纯 Ref2VA，不能拿它证明混合模式的画面、声音或跨段连续性。仅纯参考时的原有条件顺序保持不变。
 
 Reference images keep their aspect ratio and are only downscaled when their
 pixel area exceeds the requested generation canvas.
@@ -94,3 +97,9 @@ frame rate and optional soundtrack; non-24-fps inputs are resampled internally.
 - MiniMax-H3 runs at 24 fps; another requested value is overridden.
 - The default video flow shift is 12. The audio stream is mapped internally to
   its shift of 3, so the regular samplers can operate on the packed AV latent.
+
+## V100 / SM70 多卡运行
+
+`--split-mode layer` 的图切分路径按后端容量规划均衡的连续层边界；如果均衡目标无法形成合法布局，回退原来的连续容量优先分配，不因均衡失败而拒绝原本能容纳的布局。现有参数分配的复用行为不变。
+
+请分别预留权重、运行图及临时工作空间，不能只凭总显存判断单卡峰值安全。图片与 H3 既有编译选项的差异、Attention / Graph 条件及复现边界见 [SM70 构建说明](sm70.md)。
