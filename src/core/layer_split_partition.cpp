@@ -151,27 +151,23 @@ namespace sd {
             return param_assignments.count(param) != 0;
         });
 
+        std::vector<size_t> planned_backend_by_segment;
+        if (!reuse_assignments &&
+            !balanced_layer_split_backend_indices(segment_param_bytes,
+                                                  backend_capacities,
+                                                  &planned_backend_by_segment)) {
+            LOG_ERROR("%s graph-cut layer split cannot balance %.1f MB across the configured backend capacities",
+                      desc,
+                      total_param_bytes / (1024.0 * 1024.0));
+            return false;
+        }
+
         std::vector<ggml_backend_t> backend_by_segment(plan.segments.size(), split_backends[0]);
         size_t current_backend = 0;
-        int64_t current_used   = 0;
         for (size_t seg_idx = 0; seg_idx < plan.segments.size(); seg_idx++) {
-            int64_t bytes = segment_param_bytes[seg_idx];
-            while (!reuse_assignments && current_backend + 1 < split_backends.size() &&
-                   bytes > 0 &&
-                   current_used + bytes > backend_capacities[current_backend]) {
-                current_backend++;
-                current_used = 0;
+            if (!reuse_assignments) {
+                current_backend = planned_backend_by_segment[seg_idx];
             }
-            if (!reuse_assignments && bytes > 0 && current_used + bytes > backend_capacities[current_backend]) {
-                LOG_ERROR("%s graph-cut layer split: segment %zu needs %.1f MB on %s, but only %.1f MB is available under current VRAM limits",
-                          desc,
-                          seg_idx,
-                          (current_used + bytes) / (1024.0 * 1024.0),
-                          layer_split_backend_device_display_name(split_backends[current_backend]).c_str(),
-                          backend_capacities[current_backend] / (1024.0 * 1024.0));
-                return false;
-            }
-            current_used += bytes;
 
             for (ggml_tensor* param : segment_params[seg_idx]) {
                 ggml_backend_t target_backend = split_backends[current_backend];
