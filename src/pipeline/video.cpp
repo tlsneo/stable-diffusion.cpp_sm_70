@@ -499,10 +499,7 @@ namespace sd::pipeline {
             bool has_references = sd_vid_gen_params->ref_images_count > 0 ||
                                   sd_vid_gen_params->ref_videos_count > 0 ||
                                   sd_vid_gen_params->ref_audios_count > 0;
-            if (has_references && (!start_image.empty() || !end_image.empty())) {
-                LOG_ERROR("MiniMax-H3 keyframes and Ref2VA references cannot be used together");
-                return std::nullopt;
-            }
+            bool has_keyframes = !start_image.empty() || !end_image.empty();
 
             if (sd_vid_gen_params->control_frames_size > 0) {
                 LOG_ERROR("MiniMax-H3 control_frames are not implemented");
@@ -532,6 +529,9 @@ namespace sd::pipeline {
                 if (latent.empty()) {
                     LOG_ERROR("failed to encode MiniMax-H3 %s keyframe", name);
                     return false;
+                }
+                if (latents.keyframe_indices.empty() && !latents.ref_latents.empty()) {
+                    latents.keyframe_indices.resize(latents.ref_latents.size(), -1);
                 }
                 latents.ref_images.push_back(image);
                 latents.ref_latents.push_back(add_visual_noise(std::move(latent)));
@@ -713,11 +713,17 @@ namespace sd::pipeline {
                 }
             }
 
-            if (!has_references && (!start_image.empty() || !end_image.empty())) {
-                LOG_INFO(!start_image.empty() && !end_image.empty() ? "MiniMax-H3 FL2VA" : !start_image.empty() ? "MiniMax-H3 I2VA"
-                                                                                                                : "MiniMax-H3 end-frame conditioning");
+            if (has_keyframes) {
+                if (has_references) {
+                    LOG_INFO(!start_image.empty() && !end_image.empty() ? "MiniMax-H3 Ref2VA + FL2VA"
+                             : !start_image.empty()                     ? "MiniMax-H3 Ref2VA + I2VA"
+                                                                        : "MiniMax-H3 Ref2VA + end-frame conditioning");
+                } else {
+                    LOG_INFO(!start_image.empty() && !end_image.empty() ? "MiniMax-H3 FL2VA" : !start_image.empty() ? "MiniMax-H3 I2VA"
+                                                                                                                    : "MiniMax-H3 end-frame conditioning");
+                }
             }
-            if (!has_references &&
+            if (has_keyframes &&
                 (!add_keyframe(start_image, 0, "start") ||
                  !add_keyframe(end_image, request->frames - 1, "end"))) {
                 return std::nullopt;
