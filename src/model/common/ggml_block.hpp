@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "core/ggml_extend.h"
+#include "core/ggml_extend_backend.h"
 #include "core/ggml_runner.h"
 #include "model.h"
 
@@ -205,6 +206,11 @@ public:
         force_prec_f32 = force_prec_f32_;
     }
 
+    bool has_quantized_weight() const {
+        auto it = params.find("weight");
+        return it != params.end() && it->second != nullptr && ggml_is_quantized(it->second->type);
+    }
+
     ggml_tensor* forward(GGMLRunnerContext* ctx, ggml_tensor* x) override {
         ggml_tensor* w            = params["weight"];
         const float scale         = ctx->linear_scale > 0.f ? ctx->linear_scale : this->scale;
@@ -215,9 +221,9 @@ public:
             if (ctx->backend != nullptr) {
                 ggml_tensor* fp8_matmul = ggml_mul_mat(ctx->ggml_ctx, w, x);
                 if (force_prec_f32) {
-                    ggml_mul_mat_set_prec(fp8_matmul, GGML_PREC_F32);
+                    ggml_prec_set_acc(fp8_matmul, GGML_PREC_F32);
                 }
-                supports_fp8_matmul = ggml_backend_supports_op(ctx->backend, fp8_matmul);
+                supports_fp8_matmul = ggml_backend_supports_op(ctx->backend, fp8_matmul) && !sd_backend_is_cpu(ctx->backend);
             }
             if (!supports_fp8_matmul) {
                 w = ggml_cast(ctx->ggml_ctx, w, GGML_TYPE_BF16);

@@ -4,8 +4,11 @@
 #include <cstdint>
 #include <vector>
 
+#include "core/ggml_extensions.h"
 #include "ggml-backend.h"
 #include "ggml.h"
+
+struct GGMLRunnerContext;
 
 #define EPS 1e-05f
 
@@ -56,6 +59,13 @@ ggml_tensor* ggml_ext_scale(ggml_context* ctx,
                             ggml_tensor* x,
                             float factor,
                             bool inplace = false);
+
+// scale and optional shift must already be broadcastable to x in ggml layout.
+// Computes (x + x * scale) + shift; F32 uses sd.modulate.v1 when supported by ctx->backend.
+ggml_tensor* ggml_ext_modulate(GGMLRunnerContext* ctx,
+                               ggml_tensor* x,
+                               ggml_tensor* shift,
+                               ggml_tensor* scale);
 
 ggml_tensor* ggml_ext_gelu(ggml_context* ctx,
                            ggml_tensor* x,
@@ -154,7 +164,8 @@ ggml_tensor* ggml_ext_conv_3d(ggml_context* ctx,
                               int d1              = 1,
                               int d2              = 1,
                               bool force_prec_f32 = false,
-                              bool direct         = false);
+                              bool direct         = false,
+                              float scale         = 1.f);
 
 // w: [OC，IC, KD, 1 * 1]
 // x: [N, IC, ID, IH*IW]
@@ -217,11 +228,12 @@ ggml_tensor* ggml_ext_attention_ext(ggml_context* ctx,
                                     ggml_tensor* k,
                                     ggml_tensor* v,
                                     int64_t n_head,
-                                    ggml_tensor* mask = nullptr,
-                                    bool skip_reshape = false,
-                                    bool flash_attn   = false,
-                                    float kv_scale    = 1.0f,
-                                    bool sage_attn    = false);
+                                    ggml_tensor* mask     = nullptr,
+                                    bool skip_reshape     = false,
+                                    bool flash_attn       = false,
+                                    float kv_scale        = 1.0f,
+                                    bool sage_attn        = false,
+                                    bool* used_flash_attn = nullptr);
 
 ggml_tensor* ggml_ext_layer_norm(ggml_context* ctx,
                                  ggml_tensor* x,

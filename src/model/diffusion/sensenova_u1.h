@@ -442,16 +442,9 @@ namespace SenseNovaU1 {
                 k = ggml_concat(ctx->ggml_ctx, prefix_k, k, 2);
                 v = ggml_concat(ctx->ggml_ctx, prefix_v, v, 2);
             } else {
-                // Keep dedicated graph outputs alive until the runner copies them
-                // into its persistent cache buffer after graph execution.
-                auto cache_k = ggml_dup_tensor(ctx->ggml_ctx, k);
-                cache_k      = ggml_cpy(ctx->ggml_ctx, k, cache_k);
-                ggml_set_output(cache_k);
-                auto cache_v = ggml_dup_tensor(ctx->ggml_ctx, v);
-                cache_v      = ggml_cpy(ctx->ggml_ctx, v, cache_v);
-                ggml_set_output(cache_v);
-                ctx->persist_cache_tensor(layer_cache + ".k", cache_k);
-                ctx->persist_cache_tensor(layer_cache + ".v", cache_v);
+                ctx->expand_graph(q);
+                ctx->persist_cache_tensor(layer_cache + ".k", k);
+                ctx->persist_cache_tensor(layer_cache + ".v", v);
             }
 
             q = ggml_cont(ctx->ggml_ctx,
@@ -570,7 +563,7 @@ namespace SenseNovaU1 {
             blocks["language_model.model"]                       = std::make_shared<TextModel>(config);
             blocks["fm_modules.vision_model_mot_gen.embeddings"] = std::make_shared<VisionEmbeddings>(config);
             blocks["fm_modules.timestep_embedder"]               = std::make_shared<TimestepEmbedder>(config.hidden_size,
-                                                                                        config.timestep_embedding_size);
+                                                                                                      config.timestep_embedding_size);
             if (config.add_noise_scale_embedding) {
                 blocks["fm_modules.noise_scale_embedder"] = std::make_shared<TimestepEmbedder>(config.hidden_size,
                                                                                                config.timestep_embedding_size);
@@ -687,7 +680,7 @@ namespace SenseNovaU1 {
             ggml_set_name(attention_mask, "snu15.prefix.attention_mask");
             set_backend_tensor_data(attention_mask, attention_mask_vec.data());
 
-            auto runner_ctx = get_context();
+            auto runner_ctx = get_context(graph);
             auto text_model = model.text_model();
             auto hidden     = text_model->embed(&runner_ctx, ids);
             hidden          = text_model->forward(&runner_ctx,

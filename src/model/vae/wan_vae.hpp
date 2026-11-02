@@ -24,6 +24,7 @@ namespace WAN {
         std::tuple<int, int, int> padding;
         std::tuple<int, int, int> dilation;
         bool bias;
+        float scale = 1.f;
 
         void init_params(ggml_context* ctx, const String2TensorStorage& tensor_storage_map = {}, const std::string prefix = "") override {
             auto weight = tensor_storage_map.find(prefix + "weight");
@@ -60,6 +61,10 @@ namespace WAN {
               dilation(std::move(dilation)),
               bias(bias) {}
 
+        void set_scale(float scale_value) {
+            scale = scale_value;
+        }
+
         ggml_tensor* forward(GGMLRunnerContext* ctx, ggml_tensor* x, ggml_tensor* cache_x = nullptr) {
             // x: [N*IC, ID, IH, IW]
             // result: x: [N*OC, ID, IH, IW]
@@ -93,14 +98,14 @@ namespace WAN {
                 x2              = ggml_ext_conv_2d(ctx->ggml_ctx, x2, w2, b,
                                                    std::get<2>(stride), std::get<1>(stride), 0, 0,
                                                    std::get<2>(dilation), std::get<1>(dilation),
-                                                   ctx->conv2d_direct_enabled);
+                                                   ctx->conv2d_direct_enabled, false, false, scale);
                 return ggml_reshape_4d(ctx->ggml_ctx, x2, x2->ne[0], x2->ne[1], 1, out_channels);
             }
             return ggml_ext_conv_3d(ctx->ggml_ctx, ctx->backend, x, w, b, in_channels,
                                     std::get<2>(stride), std::get<1>(stride), std::get<0>(stride),
                                     0, 0, 0,
                                     std::get<2>(dilation), std::get<1>(dilation), std::get<0>(dilation),
-                                    false, ctx->conv3d_direct_enabled);
+                                    false, ctx->conv3d_direct_enabled, scale);
         }
     };
 
@@ -1079,7 +1084,7 @@ namespace WAN {
 
                 _conv_num     = 34;
                 _enc_conv_num = 26;
-            } else if (version == VERSION_QWEN_IMAGE_LAYERED) {
+            } else if (version == VERSION_QWEN_IMAGE_LAYERED || version == VERSION_MING_IMAGE) {
                 input_channels = 4;
             }
 
@@ -1116,6 +1121,19 @@ namespace WAN {
                 blocks["conv2"] = std::shared_ptr<GGMLBlock>(new Conv2dBut3d(z_dim, z_dim, {1, 1}));
             } else {
                 blocks["conv2"] = std::shared_ptr<GGMLBlock>(new CausalConv3d(z_dim, z_dim, {1, 1, 1}));
+            }
+            if (version == VERSION_QWEN_IMAGE_2_1) {
+                // Keep large VAE activations within the FP16 convolution range.
+                const float conv_scale = 1.f / 128.f;
+                std::vector<GGMLBlock*> all_blocks;
+                get_all_blocks(all_blocks);
+                for (auto block : all_blocks) {
+                    if (auto conv = dynamic_cast<Conv2d*>(block)) {
+                        conv->set_scale(conv_scale);
+                    } else if (auto conv = dynamic_cast<CausalConv3d*>(block)) {
+                        conv->set_scale(conv_scale);
+                    }
+                }
             }
         }
 
@@ -1269,9 +1287,11 @@ namespace WAN {
         ggml_tensor* decode_tiled_chunk(GGMLRunnerContext* ctx,
                                         ggml_tensor* z,
                                         int chunk_idx,
-                                        int64_t b = 1) {
+                                        int64_t b         = 1,
+                                        int decode_frames = 1) {
             // z: [b*c, t, h, w]
             GGML_ASSERT(b == 1);
+            GGML_ASSERT(decode_frames >= 1);
 
             auto decoder = std::dynamic_pointer_cast<Decoder3d>(blocks["decoder"]);
             auto conv2   = std::dynamic_pointer_cast<CausalConv3d>(blocks["conv2"]);
@@ -1285,11 +1305,13 @@ namespace WAN {
             }
 
             ggml_tensor* out = nullptr;
-            for (int64_t frame = 0; frame < x->ne[2]; ++frame) {
+            for (int64_t frame = 0; frame < x->ne[2];) {
                 const int global_frame = chunk_idx + static_cast<int>(frame);
-                auto in                = ggml_ext_slice(ctx->ggml_ctx, x, 2, frame, frame + 1);
-                _conv_idx              = 0;
-                auto out_frame         = decoder->forward(ctx, in, b, _feat_map, _conv_idx, global_frame);
+                // The first latent frame bypasses temporal upsampling and primes the causal caches.
+                const int64_t count = !is_2D && global_frame > 0 ? std::min<int64_t>(decode_frames, x->ne[2] - frame) : 1;
+                auto in             = ggml_ext_slice(ctx->ggml_ctx, x, 2, frame, frame + count);
+                _conv_idx           = 0;
+                auto out_frame      = decoder->forward(ctx, in, b, _feat_map, _conv_idx, global_frame);
                 if (is_2D && global_frame > 0) {
                     auto repeated = out_frame;
                     for (int repeat = 1; repeat < 4; ++repeat) {
@@ -1298,6 +1320,7 @@ namespace WAN {
                     out_frame = repeated;
                 }
                 out = out == nullptr ? out_frame : ggml_concat(ctx->ggml_ctx, out, out_frame, 2);
+                frame += count;
             }
             return unpatchify(ctx->ggml_ctx, out, patch_size, b);
         }
@@ -1405,11 +1428,17 @@ namespace WAN {
         }
 
         sd::Tensor<float> diffusion_to_vae_latents(const sd::Tensor<float>& latents) override {
+            if (version == VERSION_MING_IMAGE) {
+                return latents / 8.0064f;
+            }
             auto [mean_tensor, std_tensor] = get_latents_mean_std(latents);
             return (latents * std_tensor) / scale_factor + mean_tensor;
         }
 
         sd::Tensor<float> vae_to_diffusion_latents(const sd::Tensor<float>& latents) override {
+            if (version == VERSION_MING_IMAGE) {
+                return latents * 8.0064f;
+            }
             auto [mean_tensor, std_tensor] = get_latents_mean_std(latents);
             return ((latents - mean_tensor) * scale_factor) / std_tensor;
         }
@@ -1431,7 +1460,7 @@ namespace WAN {
             return gf;
         }
 
-        ggml_cgraph* build_temporal_tile_graph(const sd::Tensor<float>& z_tensor, int chunk_idx) {
+        ggml_cgraph* build_temporal_tile_graph(const sd::Tensor<float>& z_tensor, int chunk_idx, int decode_frames) {
             ggml_cgraph* gf = new_graph_custom(std::max<size_t>(20480, 10240 * z_tensor.shape()[2]));
 
             ae.clear_cache();
@@ -1443,15 +1472,15 @@ namespace WAN {
 
             ggml_tensor* z = make_input(z_tensor);
 
-            auto runner_ctx = get_context();
+            auto runner_ctx = get_context(gf);
 
-            ggml_tensor* out = ae.decode_tiled_chunk(&runner_ctx, z, chunk_idx);
+            ggml_tensor* out = ae.decode_tiled_chunk(&runner_ctx, z, chunk_idx, 1,
+                                                     version == VERSION_WAN2_2_TI2V ? decode_frames : 1);
 
             for (size_t feat_idx = 0; feat_idx < ae._feat_map.size(); feat_idx++) {
                 ggml_tensor* feat_cache = ae._feat_map[feat_idx];
                 if (feat_cache != nullptr) {
-                    cache("feat_idx:" + std::to_string(feat_idx), feat_cache);
-                    ggml_build_forward_expand(gf, feat_cache);
+                    runner_ctx.persist_cache_tensor("feat_idx:" + std::to_string(feat_idx), feat_cache);
                 }
             }
 
@@ -1469,8 +1498,19 @@ namespace WAN {
             stateful_config.overlap                 = 0;
             auto plan                               = make_vae_temporal_tile_plan(input.shape()[2], stateful_config);
 
-            LOG_VERBOSE("Wan VAE stateful temporal tiling: tile_frames=%d, total latent frames=%lld, tiles=%d",
+            if (sd_version_is_wan(version) && !ae.is_2D && plan.tiles.size() > 1 &&
+                plan.tiles.size() <= 3 && plan.tile_frames > 2 &&
+                plan.tiles.back().end - plan.tiles.back().start == 1) {
+                // Longer plans retain full middle tiles, so balancing their tail cannot shrink the largest decoded output.
+                auto& previous = plan.tiles[plan.tiles.size() - 2];
+                auto& last     = plan.tiles.back();
+                --previous.end;
+                --last.start;
+            }
+
+            LOG_VERBOSE("Wan VAE stateful temporal tiling: tile_frames=%d, decode_frames=%d, total latent frames=%lld, tiles=%d",
                         plan.tile_frames,
+                        version == VERSION_WAN2_2_TI2V && !ae.is_2D ? config.decode_frames : 1,
                         (long long)input.shape()[2],
                         (int)plan.tiles.size());
 
@@ -1484,7 +1524,7 @@ namespace WAN {
                             (long long)tile.start,
                             (long long)tile.end);
                 auto get_graph = [&]() -> ggml_cgraph* {
-                    return build_temporal_tile_graph(input_tile, static_cast<int>(tile.start));
+                    return build_temporal_tile_graph(input_tile, static_cast<int>(tile.start), config.decode_frames);
                 };
                 return restore_trailing_singleton_dims(
                     GGMLRunner::compute(get_graph, n_threads, false),
